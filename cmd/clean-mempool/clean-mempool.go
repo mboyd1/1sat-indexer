@@ -65,7 +65,7 @@ func main() {
 
 func cleanupTxns() (rowCount int, cleaned int, cleared int) {
 	rows, err := lib.Db.Query(ctx, `SELECT txid FROM txns
-		WHERE (height IS NULL OR height=0 OR idx=0) AND created < NOW() - interval '3h'
+		WHERE (height IS NULL OR height=0 OR idx=0) AND created < NOW() - interval '3h' AND rolledback IS NULL
 		LIMIT 1000`)
 	if err != nil {
 		log.Panicln(err)
@@ -89,11 +89,21 @@ func cleanupTxns() (rowCount int, cleaned int, cleared int) {
 				<-limiter
 				wg.Done()
 			}()
+			// A 404 is a real answer (tx is gone -> roll it back below). Any other error is
+			// transient upstream trouble; panicking on it killed the whole process and pm2
+			// restarted straight into the same failure -- 60 crashes in 9s during one 502 blip.
 			txn, err := lib.JB.GetTransaction(ctx, hex.EncodeToString(txid))
+			for attempt := 1; err != nil && !strings.HasPrefix(err.Error(), "server error: 404") && attempt < 5; attempt++ {
+				log.Println("Validating", hex.EncodeToString(txid), err, "- retry", attempt)
+				time.Sleep(time.Duration(attempt) * 2 * time.Second)
+				txn, err = lib.JB.GetTransaction(ctx, hex.EncodeToString(txid))
+			}
 			if err != nil {
 				log.Println("Validating", hex.EncodeToString(txid), err)
 				if !strings.HasPrefix(err.Error(), "server error: 404") {
-					log.Panicln(err)
+					// Leave this txid for the next pass rather than taking the process down.
+					log.Println("Giving up on", hex.EncodeToString(txid), "this pass:", err)
+					return
 				}
 			}
 			if txn != nil && txn.BlockHeight > 0 {
@@ -131,6 +141,7 @@ func cleanupTxns() (rowCount int, cleaned int, cleared int) {
 				}
 				cleaned++
 			} else {
+				log.Println("Rolling Back:", hex.EncodeToString(txid))
 				result, err := lib.Db.Exec(ctx,
 					"UPDATE txos SET spend='\\x' WHERE spend=$1",
 					txid,
