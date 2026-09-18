@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -117,14 +118,19 @@ func main() {
 	}()
 
 	var sub *junglebus.Subscription
+	// Only the main goroutine ever touches `sub`. Callbacks (which run on junglebus queue
+	// goroutines) just raise this flag, so a second queued status can no longer call
+	// Unsubscribe() on an already-nil subscription -- that nil deref was crashing this
+	// process on nearly every catch-up to the chaintip.
+	var stopRequested int32
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigs
 		fmt.Printf("Caught signal")
 		fmt.Println("Unsubscribing and exiting...")
-		if sub != nil {
-			sub.Unsubscribe()
+		if s := sub; s != nil {
+			s.Unsubscribe()
 		}
 		os.Exit(0)
 	}()
@@ -133,6 +139,13 @@ func main() {
 	timer := time.NewTicker(30 * time.Second)
 	for {
 		<-timer.C
+		if atomic.CompareAndSwapInt32(&stopRequested, 1, 0) {
+			if sub != nil {
+				sub.Unsubscribe()
+				sub = nil
+			}
+			continue
+		}
 		if sub != nil {
 			continue
 		}
@@ -232,8 +245,7 @@ func main() {
 						)
 						if status.Block > chaintip.Height-5 {
 							log.Println("Caught up to chaintip - 5. Waiting", status.Block, chaintip.Height)
-							sub.Unsubscribe()
-							sub = nil
+							atomic.StoreInt32(&stopRequested, 1)
 							return
 						}
 					}
