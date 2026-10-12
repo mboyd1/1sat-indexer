@@ -85,7 +85,9 @@ func loadSrcMine(ctx *lib.IndexContext) (srcMine *OpNS) {
 			break
 		}
 	}
-	// log.Println("source", source.String())
+	if source == nil {
+		return nil
+	}
 	srcData, _ := lib.LoadTxoData(source)
 	for i := 0; i < 2; i++ {
 		if srcData != nil {
@@ -101,11 +103,14 @@ func loadSrcMine(ctx *lib.IndexContext) (srcMine *OpNS) {
 		if i > 0 {
 			break
 		}
-		srcTx, err := lib.LoadRawtx(hex.EncodeToString(ctx.Spends[0].Outpoint.Txid()))
+		srcTx, err := lib.LoadRawtx(hex.EncodeToString(source.Txid()))
 		if err != nil {
 			log.Panicln(err)
 		}
 		srcCtx := IndexTxn(srcTx, "", 0, 0, true)
+		if int(source.Vout()) >= len(srcCtx.Txos) {
+			return nil
+		}
 		srcData = srcCtx.Txos[source.Vout()].Data
 	}
 	return srcMine
